@@ -68,14 +68,23 @@ def kernel_ref(owner: str, stage: str, exp: str, the_id: str) -> str:
     return f"{_require_safe(owner, 'username')}/{kernel_slug(stage, exp, the_id)}"
 
 
-def dataset_mount(owner: str, ds_slug: str) -> str:
-    """Маунт-путь датасета внутри кернела."""
-    return f"{INPUT_ROOT}/datasets/{owner}/{ds_slug}"
+def _require_ref(ref: str, what: str) -> str:
+    """ref всегда одна строка 'owner/slug' — ровно так он ходит в конфиге,
+    манифесте и kernel-metadata. Никаких сплитов у вызывающих."""
+    owner, sep, slug = ref.partition("/")
+    if not sep or not owner or not slug or "/" in slug:
+        raise ValueError(f"{what} '{ref}' должен иметь вид 'owner/slug'.")
+    return ref
 
 
-def notebook_mount(owner: str, k_slug: str) -> str:
-    """Маунт-путь output'а кернела (kernel_sources) внутри кернела."""
-    return f"{INPUT_ROOT}/notebooks/{owner}/{k_slug}"
+def dataset_mount(ds_ref: str) -> str:
+    """Маунт-путь датасета внутри кернела. ds_ref = 'owner/slug'."""
+    return f"{INPUT_ROOT}/datasets/{_require_ref(ds_ref, 'dataset ref')}"
+
+
+def notebook_mount(kernel_ref_str: str) -> str:
+    """Маунт-путь output'а кернела (kernel_sources). kernel_ref_str = 'owner/slug'."""
+    return f"{INPUT_ROOT}/notebooks/{_require_ref(kernel_ref_str, 'kernel ref')}"
 
 
 def competition_mount(comp_slug: str) -> str:
@@ -83,8 +92,8 @@ def competition_mount(comp_slug: str) -> str:
     return f"{INPUT_ROOT}/competitions/{comp_slug}"
 
 
-def train_weights_mount(owner: str, exp: str, run_id: str) -> str:
+def train_weights_mount(train_kernel_ref: str) -> str:
     """Корень весов рана, видимый из infer-кернела: маунт output'а
-    train-кернела + подпапка weights. utils.weights.weights_path(корень, run_id)
-    дальше сам добавит <run_id>/."""
-    return f"{notebook_mount(owner, kernel_slug('train', exp, run_id))}/{WEIGHTS_SUBDIR}"
+    train-кернела ('owner/train-<exp>-<run_id>') + подпапка weights.
+    utils.weights.weights_path(корень, run_id) дальше сам добавит <run_id>/."""
+    return f"{notebook_mount(train_kernel_ref)}/{WEIGHTS_SUBDIR}"

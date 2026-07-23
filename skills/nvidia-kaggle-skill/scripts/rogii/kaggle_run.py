@@ -193,12 +193,11 @@ def main() -> None:
     preflight_sources_fresh(cfg, expected)
 
     user = cfg["kaggle_username"]
-    src_owner, src_slug = cfg["sources_dataset"].split("/", 1)
 
     # ---- фаза 1: mint + шапка ----
     values = {
         "EXP": args.exp,
-        "SOURCES_DIR": naming.dataset_mount(src_owner, src_slug),
+        "SOURCES_DIR": naming.dataset_mount(cfg["sources_dataset"]),
         "INPUT_DIR": naming.competition_mount(cfg["competition"]),
         "OUTPUT_DIR": KAGGLE_WORKING,
         "GIT_SHA": git_sha,
@@ -225,15 +224,13 @@ def main() -> None:
                 die(f"у рана {rid} в манифесте нет весов.")
             ref = manifest.weights.ref
             if ref.startswith("kernel:"):
-                kref = ref.removeprefix("kernel:")  # owner/slug — владелец из манифеста!
+                kref = ref.removeprefix("kernel:")  # 'owner/slug' — владелец из манифеста!
                 kernel_sources.append(kref)
-                owner, kslug = kref.split("/", 1)
-                weights_dirs[rid] = f"{naming.notebook_mount(owner, kslug)}/{naming.WEIGHTS_SUBDIR}"
+                weights_dirs[rid] = naming.train_weights_mount(kref)
             elif ref.startswith("dataset:"):
                 dref = ref.removeprefix("dataset:")
                 dataset_sources.append(dref)
-                owner, dslug = dref.split("/", 1)
-                weights_dirs[rid] = naming.dataset_mount(owner, dslug)
+                weights_dirs[rid] = naming.dataset_mount(dref)
             elif ref == "local":
                 die(
                     f"веса рана {rid} локальные — на кагл они не заливались. "
