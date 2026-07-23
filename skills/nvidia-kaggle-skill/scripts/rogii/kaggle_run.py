@@ -192,14 +192,12 @@ def main() -> None:
 
     if args.stage == "train":
         the_id = runlib.new_run_id()
-        runlib.run_dir(args.exp, the_id, root)  # место для будущего фетча
         values["RUN_ID"] = the_id
         values["WEIGHTS_DIR"] = f"{KAGGLE_WORKING}/{naming.WEIGHTS_SUBDIR}"
         values["WEIGHTS_REL"] = f"{naming.WEIGHTS_SUBDIR}/{the_id}/"
         values["WEIGHTS_REF"] = "kernel:" + naming.kernel_ref(user, "train", args.exp, the_id)
     elif args.stage == "infer":
         the_id = runlib.new_infer_id()
-        runlib.infer_dir(args.exp, the_id, root)
         run_ids = [rid.strip() for rid in args.run_ids.split(",") if rid.strip()]
         weights_paths, weights_hashes = {}, {}
         for rid in run_ids:
@@ -273,6 +271,14 @@ def main() -> None:
         print("[kaggle_run] внимание: сетевые проверки (токен, свежесть sources) "
               "при ручном пуше не выполняются; stale поймает verify в кернеле.")
         return
+
+    # Папка реестра — только для реально пушащихся запусков: --build-only выше
+    # уже вышел и пустышек в реестре не оставляет (пустая папка рана = сигнал
+    # «кернел бежит/нужен fetch» в collect_runs, брошенные сборки его шумели бы).
+    if args.stage == "train":
+        runlib.run_dir(args.exp, the_id, root)
+    elif args.stage == "infer":
+        runlib.infer_dir(args.exp, the_id, root)
 
     # ---- фаза 3: сетевые проверки + push ----
     actual_user = common.token_username()
