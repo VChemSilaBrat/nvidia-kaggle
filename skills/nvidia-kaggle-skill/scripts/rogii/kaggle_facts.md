@@ -73,3 +73,14 @@
 - Лог кернела фетчится `kaggle kernels output` как `<slug>.log`,
   формат: json-массив {stream_name, time, data}.
 - Крошечный CPU-кернел проходит очередь и бежит ~15-45с.
+
+## Standalone-врайтапы (разведка 2026-07-24)
+
+- URL двух видов: competition-scoped `.../competitions/<comp>/writeups/<slug>`
+  (upstream fetch_writeup.py, резолв через лидерборд) и **standalone**
+  `kaggle.com/writeups/<user>/<slug>` (личная страница врайтапа).
+- Standalone решается напрямую: внутренний web-сервис
+  **`discussions.WriteUpsService/GetWriteUpBySlug`**, payload `{userName, slug}`
+  → `{title, topicId, message.rawMarkdown}`. Комментарии не тянет.
+- Скрипт: `scripts/rogii/fetch_writeup_by_slug.py` (нашли network-инспекцией
+  SPA: страница — пустой шелл, данные грузит этот POST /api/i/...).
