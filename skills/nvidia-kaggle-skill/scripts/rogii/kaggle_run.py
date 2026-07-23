@@ -154,7 +154,8 @@ def main() -> None:
                         help="собрать .build/ и выйти (не пушить)")
     args = parser.parse_args()
 
-    # ---- фаза 0: pre-flight ----
+    # ---- фаза 0: локальный pre-flight (без сети — чтобы --build-only
+    #      работал оффлайн и до первого push_sources) ----
     root = common.repo_root_from_cwd()
     sys.path.insert(0, str(root))
     from utils import run as runlib  # noqa: E402 — utils ИНСТАНСА
@@ -162,13 +163,6 @@ def main() -> None:
 
     cfg = common.load_comp_config(root)
     user = cfg["kaggle_username"]
-    actual_user = common.token_username()
-    if user != actual_user:
-        raise SystemExit(
-            f"[kaggle_run] kaggle_username в comp_config.json ('{user}') != "
-            f"юзер токена ('{actual_user}'). Кернел пушится от юзера токена — "
-            "исправь свой персональный конфиг."
-        )
 
     stage_file = root / "exps" / args.exp / f"{args.stage}.py"
     if not stage_file.exists():
@@ -180,12 +174,12 @@ def main() -> None:
             "инжектить дважды нельзя."
         )
 
+    # D2: гейт совпадает с тем, что хешируется (PAYLOAD_DIRS) + файл стадии.
     rel_stage = str(stage_file.relative_to(root))
-    stamp.assert_committed(["src", "utils", rel_stage], root)
+    stamp.assert_committed([*stamp.PAYLOAD_DIRS, rel_stage], root)
 
     git_sha = stamp.current_git_sha(root)
     expected = stamp.compute_src_hash(root)
-    preflight_sources_fresh(cfg, expected)
 
     # ---- фаза 1: mint + шапка ----
     values = {
@@ -210,10 +204,17 @@ def main() -> None:
     elif args.stage == "infer":
         the_id = runlib.new_infer_id()
         runlib.infer_dir(args.exp, the_id, root)
-        run_ids = [rid for rid in args.run_ids.split(",") if rid]
+        run_ids = [rid.strip() for rid in args.run_ids.split(",") if rid.strip()]
         weights_paths, weights_hashes = {}, {}
         for rid in run_ids:
-            manifest = runlib.read_manifest(find_run_dir(root, rid))
+            rdir = find_run_dir(root, rid)
+            if not (rdir / runlib.MANIFEST_NAME).exists():
+                raise SystemExit(
+                    f"[kaggle_run] у рана {rid} нет manifest.json в {rdir} — "
+                    "он ещё не зафетчен. Сначала: fetch_run_outputs.py --kernel "
+                    f"<owner>/train-<exp>-{rid}"
+                )
+            manifest = runlib.read_manifest(rdir)
             if manifest.weights is None:
                 raise SystemExit(f"[kaggle_run] у рана {rid} в манифесте нет весов.")
             full_path, ksrc, dsrc = weights_source(
@@ -273,9 +274,20 @@ def main() -> None:
         print("[kaggle_run] --build-only; пуш вручную (ровно ЭТОЙ сборки):")
         print("  PYTHONUNBUFFERED=1", " ".join(submit_cmd))
         print("[kaggle_run] повторный kaggle_run НЕ подойдёт — он заминтит новый id.")
+        print("[kaggle_run] внимание: сетевые проверки (токен, свежесть sources) "
+              "при ручном пуше не выполняются; stale поймает verify в кернеле.")
         return
 
-    # ---- фаза 3: push (их скрипт; поллит статус до терминального) ----
+    # ---- фаза 3: сетевые проверки + push ----
+    actual_user = common.token_username()
+    if user != actual_user:
+        raise SystemExit(
+            f"[kaggle_run] kaggle_username в comp_config.json ('{user}') != "
+            f"юзер токена ('{actual_user}'). Кернел пушится от юзера токена — "
+            "исправь свой персональный конфиг."
+        )
+    preflight_sources_fresh(cfg, expected)
+
     print("[kaggle_run] пуш через submit_kernel.py ...")
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     proc = subprocess.Popen(

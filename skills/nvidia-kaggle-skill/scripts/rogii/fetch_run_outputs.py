@@ -64,6 +64,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="стянуть output кернела в реестр")
     parser.add_argument("--kernel", required=True,
                         help="owner/slug кернела (печатает kaggle_run в конце)")
+    parser.add_argument(
+        "--allow-missing", action="store_true",
+        help="разрешить отсутствие manifest/record (диагностика упавшего кернела: "
+             "забрать хотя бы лог)",
+    )
     args = parser.parse_args()
 
     root = common.repo_root_from_cwd()
@@ -84,6 +89,10 @@ def main() -> None:
 
         # Куда класть: train/infer — сверяем самоописание артефакта со слагом;
         # debug — только слаг (манифеста нет by design).
+        # train/infer обязаны самоописаться (manifest/record); их отсутствие =
+        # кернел упал до записи провенанса → без --allow-missing НЕ регистрируем
+        # ран как успешный (иначе тихая дыра в провенансе). debug манифеста
+        # не пишет by design.
         if stage == "train":
             man_path = tmp / "manifest.json"
             if man_path.exists():
@@ -93,6 +102,15 @@ def main() -> None:
                         f"[fetch] манифест ({man['exp']}, {man['run_id']}) не совпал "
                         f"со слагом ({exp}, {the_id}) — что-то сильно не так."
                     )
+            elif not args.allow_missing:
+                raise SystemExit(
+                    f"[fetch] в output {args.kernel} НЕТ manifest.json — train упал "
+                    "до write_manifest? Ран не регистрируется. Чтобы забрать лог "
+                    "для диагностики: повтори с --allow-missing."
+                )
+            else:
+                print("[fetch] WARNING: manifest.json отсутствует (--allow-missing) — "
+                      "это НЕ валидный ран, забираю что есть для диагностики")
             dest = root / "exps" / exp / "runs" / the_id
         elif stage == "infer":
             rec_path = tmp / "record.json"
@@ -103,6 +121,14 @@ def main() -> None:
                         f"[fetch] record ({rec['exp']}, {rec['infer_id']}) не совпал "
                         f"со слагом ({exp}, {the_id}) — что-то сильно не так."
                     )
+            elif not args.allow_missing:
+                raise SystemExit(
+                    f"[fetch] в output {args.kernel} НЕТ record.json — infer упал "
+                    "до write_infer_record? Не регистрируется. Для лога: --allow-missing."
+                )
+            else:
+                print("[fetch] WARNING: record.json отсутствует (--allow-missing) — "
+                      "это НЕ валидный инфер, забираю что есть для диагностики")
             dest = root / "exps" / exp / "infers" / the_id
         else:
             dest = root / "exps" / exp / "debug"

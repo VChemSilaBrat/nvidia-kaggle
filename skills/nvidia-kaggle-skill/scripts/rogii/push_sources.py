@@ -32,12 +32,23 @@ import common  # noqa: E402
 
 
 def dataset_exists(ds_ref: str) -> bool:
-    """Детерминированная развилка create/version (не фолбэк по тексту ошибки)."""
+    """Развилка create/version. Три исхода, неоднозначность НЕ выбирает ветку:
+    rc==0 → существует; rc!=0 с явным 404/not found → не существует;
+    всё остальное (сеть/авторизация/5xx) → громкий крэш с полным выводом."""
     res = subprocess.run(
         [common.kaggle_cli(), "datasets", "status", ds_ref],
         capture_output=True, text=True,
     )
-    return res.returncode == 0
+    if res.returncode == 0:
+        return True
+    output = (res.stdout + res.stderr).lower()
+    if "404" in output or "not found" in output:
+        return False
+    raise SystemExit(
+        f"[push_sources] не смог определить, существует ли {ds_ref} "
+        "(это не 404 — сеть/авторизация/лимиты?):\n"
+        f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    )
 
 
 def main() -> None:

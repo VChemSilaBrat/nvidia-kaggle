@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,15 @@ def load_comp_config(root: Path) -> dict:
             )
     if "/" not in cfg["sources_dataset"]:
         raise SystemExit("[rogii] sources_dataset должен быть 'owner/slug'.")
+    # Слаг обязан быть kaggle-каноничным ЗАРАНЕЕ: upstream upload_dataset
+    # прогоняет title через slugify и МОЛЧА перепишет 'lung_src' в 'lung-src' —
+    # датасет создастся под другим ref, чем ссылается весь конвейер.
+    _, _, ds_slug = cfg["sources_dataset"].partition("/")
+    if not re.fullmatch(r"[a-z0-9-]{6,50}", ds_slug):
+        raise SystemExit(
+            f"[rogii] слаг sources_dataset '{ds_slug}' не kaggle-каноничен: "
+            "нужны только [a-z0-9-], длина 6-50. Переименуй в comp_config.json."
+        )
     return cfg
 
 
