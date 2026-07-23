@@ -37,14 +37,12 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # соседние rogii-модули
 import common  # noqa: E402
 import naming  # noqa: E402
 
-MARKER_PREFIX = "# === injected by"
 KAGGLE_WORKING = "/kaggle/working"
 
 # P100 (sm_60) может не поддерживаться торчем текущего кагл-образа
@@ -54,39 +52,45 @@ GPU_SHAPES = {"t4": "NvidiaTeslaT4", "p100": "NvidiaTeslaP100"}
 
 
 def preflight_sources_fresh(cfg: dict, expected_hash: str) -> None:
-    """Сверить _stamp.json ПОСЛЕДНЕЙ версии sources-датасета с локальным хешем.
+    """Сверить стемп ПОСЛЕДНЕЙ версии sources-датасета с локальным хешем.
 
     Ловит «правил src, забыл push_sources» до пуша кернела. Вторая линия —
     stamp.verify внутри кернела (пиннинга версий у кагла нет, см. kaggle_facts):
     она ловит stale-attach между пушем и стартом, эта — экономит очередь.
+
+    Имя/схема стемп-файла принадлежат utils/stamp.py (STAMP_NAME, read_stamp
+    рядом с писателем stamp_payload) — здесь литералов нет.
     """
+    from utils import stamp  # utils ИНСТАНСА (sys.path выставлен в main)
+
     with tempfile.TemporaryDirectory() as td:
         res = subprocess.run(
             [common.kaggle_cli(), "datasets", "download", cfg["sources_dataset"],
-             "-f", "_stamp.json", "-p", td, "--force"],
+             "-f", stamp.STAMP_NAME, "-p", td, "--force"],
             capture_output=True, text=True,
         )
         if res.returncode != 0:
             raise SystemExit(
-                f"[kaggle_run] не удалось скачать _stamp.json из {cfg['sources_dataset']}.\n"
+                f"[kaggle_run] не удалось скачать {stamp.STAMP_NAME} из "
+                f"{cfg['sources_dataset']}.\n"
                 "Датасет ещё не создан или недоступен → запусти push_sources.py.\n"
                 f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
             )
-        stamp_file = Path(td) / "_stamp.json"
-        zipped = Path(td) / "_stamp.json.zip"
+        zipped = Path(td) / f"{stamp.STAMP_NAME}.zip"
         # Текущий CLI отдаёт мелкие файлы как есть (проверено эмпирически);
         # zip-вариант задокументирован для CLI — ветка оставлена, чтобы при
         # его срабатывании диагноз не врал.
-        if not stamp_file.exists() and zipped.exists():
-            print("[kaggle_run] _stamp.json пришёл zip'ом — распаковываю")
+        if not (Path(td) / stamp.STAMP_NAME).exists() and zipped.exists():
+            print(f"[kaggle_run] {stamp.STAMP_NAME} пришёл zip'ом — распаковываю")
             with zipfile.ZipFile(zipped) as zf:
-                zf.extract("_stamp.json", td)
-        if not stamp_file.exists():
+                zf.extract(stamp.STAMP_NAME, td)
+        try:
+            attached = stamp.read_stamp(td)["src_hash"]
+        except FileNotFoundError:
             raise SystemExit(
-                "[kaggle_run] в sources-датасете нет _stamp.json — "
+                f"[kaggle_run] в sources-датасете нет {stamp.STAMP_NAME} — "
                 "он запушен не push_sources'ом."
-            )
-        attached = json.loads(stamp_file.read_text(encoding="utf-8"))["src_hash"]
+            ) from None
     if attached != expected_hash:
         raise SystemExit(
             "[kaggle_run] sources-датасет отстал от локального src:\n"
@@ -129,15 +133,6 @@ def weights_source(ref: str, path: str, rid: str) -> tuple[str, str | None, str 
     raise SystemExit(f"[kaggle_run] неизвестный weights.ref '{ref}' у рана {rid}.")
 
 
-def build_header(script: str, exp: str, stage: str, values: dict) -> str:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    lines = [f"{MARKER_PREFIX} {script} @ {now} | {exp} | {stage} ==="]
-    for name, value in values.items():
-        lines.append(f"{name} = {value!r}")
-    lines.append("# === end injected header ===")
-    return "\n".join(lines) + "\n\n"
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="build+push стадии экспа на Kaggle")
     parser.add_argument("--exp", required=True, help="имя экспа: exp-0001 (только [a-z0-9-])")
@@ -160,6 +155,7 @@ def main() -> None:
     sys.path.insert(0, str(root))
     from utils import run as runlib  # noqa: E402 — utils ИНСТАНСА
     from utils import stamp  # noqa: E402
+    from utils.inject import MARKER_PREFIX, build_header  # noqa: E402 — общий формат шапки
 
     cfg = common.load_comp_config(root)
     user = cfg["kaggle_username"]

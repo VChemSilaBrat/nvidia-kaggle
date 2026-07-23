@@ -36,23 +36,6 @@ import naming  # noqa: E402
 # Служебные файлы, которые кагл добавляет в output кернела — в реестр не тащим.
 _SERVICE_PREFIXES = ("__script__", "__results__", "__output__", "custom.css")
 
-# id вида 20260723t080138-680-d078 — ровно 3 dash-куска (см. utils/run.py).
-_ID_PARTS = 3
-
-
-def parse_slug(slug: str) -> tuple[str, str, str]:
-    """<stage>-<exp>-<id> → (stage, exp, id). Обратная к naming.kernel_slug.
-
-    stage — один кусок, id — ровно _ID_PARTS кусков с конца, exp — середина.
-    """
-    parts = slug.split("-")
-    if len(parts) < 1 + 1 + _ID_PARTS:
-        raise SystemExit(f"[fetch] слаг '{slug}' не похож на <stage>-<exp>-<id>.")
-    stage, exp_parts, id_parts = parts[0], parts[1:-_ID_PARTS], parts[-_ID_PARTS:]
-    if stage not in ("train", "infer", "debug"):
-        raise SystemExit(f"[fetch] неизвестная стадия '{stage}' в слаге '{slug}'.")
-    return stage, "-".join(exp_parts), "-".join(id_parts)
-
 
 def log_to_text(log_path: Path) -> str:
     """Лог кернела (json-массив) → читаемый текст с префиксами потоков."""
@@ -72,8 +55,14 @@ def main() -> None:
     args = parser.parse_args()
 
     root = common.repo_root_from_cwd()
+    sys.path.insert(0, str(root))
+    from utils import run as runlib  # noqa: E402 — реестр/схемы владеет run.py
+
     _, _, slug = args.kernel.partition("/")
-    stage, exp, the_id = parse_slug(slug)
+    try:
+        stage, exp, the_id = naming.parse_slug(slug)
+    except ValueError as e:
+        raise SystemExit(f"[fetch] {e}") from None
 
     with tempfile.TemporaryDirectory() as td:
         res = subprocess.run(
@@ -94,12 +83,12 @@ def main() -> None:
         # ран как успешный (иначе тихая дыра в провенансе). debug манифеста
         # не пишет by design.
         if stage == "train":
-            man_path = tmp / "manifest.json"
+            man_path = tmp / runlib.MANIFEST_NAME
             if man_path.exists():
-                man = json.loads(man_path.read_text(encoding="utf-8"))
-                if (man["exp"], man["run_id"]) != (exp, the_id):
+                man = runlib.read_manifest(tmp)
+                if (man.exp, man.run_id) != (exp, the_id):
                     raise SystemExit(
-                        f"[fetch] манифест ({man['exp']}, {man['run_id']}) не совпал "
+                        f"[fetch] манифест ({man.exp}, {man.run_id}) не совпал "
                         f"со слагом ({exp}, {the_id}) — что-то сильно не так."
                     )
             elif not args.allow_missing:
@@ -111,14 +100,14 @@ def main() -> None:
             else:
                 print("[fetch] WARNING: manifest.json отсутствует (--allow-missing) — "
                       "это НЕ валидный ран, забираю что есть для диагностики")
-            dest = root / "exps" / exp / "runs" / the_id
+            dest = runlib.run_dir(exp, the_id, root)
         elif stage == "infer":
-            rec_path = tmp / "record.json"
+            rec_path = tmp / runlib.RECORD_NAME
             if rec_path.exists():
-                rec = json.loads(rec_path.read_text(encoding="utf-8"))
-                if (rec["exp"], rec["infer_id"]) != (exp, the_id):
+                rec = runlib.read_infer_record(tmp)
+                if (rec.exp, rec.infer_id) != (exp, the_id):
                     raise SystemExit(
-                        f"[fetch] record ({rec['exp']}, {rec['infer_id']}) не совпал "
+                        f"[fetch] record ({rec.exp}, {rec.infer_id}) не совпал "
                         f"со слагом ({exp}, {the_id}) — что-то сильно не так."
                     )
             elif not args.allow_missing:
@@ -129,7 +118,7 @@ def main() -> None:
             else:
                 print("[fetch] WARNING: record.json отсутствует (--allow-missing) — "
                       "это НЕ валидный инфер, забираю что есть для диагностики")
-            dest = root / "exps" / exp / "infers" / the_id
+            dest = runlib.infer_dir(exp, the_id, root)
         else:
             dest = root / "exps" / exp / "debug"
         dest.mkdir(parents=True, exist_ok=True)
@@ -142,7 +131,7 @@ def main() -> None:
             if rel.parts[0] == naming.WEIGHTS_SUBDIR:
                 skipped.append(str(rel))  # веса живут в output кернела, не в гите
                 continue
-            if rel.name.startswith(_SERVICE_PREFIXES) or rel.name in _SERVICE_PREFIXES:
+            if rel.name.startswith(_SERVICE_PREFIXES):
                 continue
             if rel.name == f"{slug}.log":
                 (dest / "log.txt").write_text(log_to_text(path), encoding="utf-8")

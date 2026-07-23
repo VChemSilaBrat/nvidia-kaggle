@@ -67,6 +67,27 @@ def kernel_slug(stage: str, exp: str, the_id: str) -> str:
     return slug
 
 
+# id из utils/run.py (new_run_id): YYYYmmddtHHMMSS-<ms>-<4hex> — ровно 3
+# dash-куска. parse_slug опирается на это; изменится формат id — менять тут.
+_ID_PARTS = 3
+
+
+def parse_slug(slug: str) -> tuple[str, str, str]:
+    """<stage>-<exp>-<id> → (stage, exp, id). ОБРАТНАЯ функция к kernel_slug,
+    живёт рядом с прямой, чтобы они не разъехались.
+
+    stage — один кусок, id — ровно _ID_PARTS кусков с конца, exp — середина
+    (сам содержит дефисы: exp-0001).
+    """
+    parts = slug.split("-")
+    if len(parts) < 1 + 1 + _ID_PARTS:
+        raise ValueError(f"слаг '{slug}' не похож на <stage>-<exp>-<id>.")
+    stage, exp_parts, id_parts = parts[0], parts[1:-_ID_PARTS], parts[-_ID_PARTS:]
+    if stage not in ("train", "infer", "debug"):
+        raise ValueError(f"неизвестная стадия '{stage}' в слаге '{slug}'.")
+    return stage, "-".join(exp_parts), "-".join(id_parts)
+
+
 def kernel_ref(owner: str, stage: str, exp: str, the_id: str) -> str:
     """Полная ссылка кернела '<owner>/<slug>' — для kernel-metadata.json id,
     kernel_sources и weights-ref ('kernel:<owner>/<slug>') в манифесте."""
