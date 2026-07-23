@@ -15,6 +15,11 @@
 ([a-z0-9-]) по конвенции репы (папки exps — через дефис: exp-0001; run_id
 генерится kaggle-safe в utils/run.py). Не kaggle-safe → громкий ValueError.
 
+Правило валидации: то, что МЫ МИНТИМ (слаги/id кернелов), проверяется строгим
+чарсетом (_require_safe); то, что ПРИХОДИТ ИЗВНЕ (ref'ы датасетов/кернелов из
+конфига и манифестов, слаг соревнования), проверяется только по форме
+(_require_ref / непустота) — их именование задаёт кагл, не мы.
+
 Только stdlib.
 """
 
@@ -89,11 +94,6 @@ def notebook_mount(kernel_ref_str: str) -> str:
 
 def competition_mount(comp_slug: str) -> str:
     """Маунт-путь данных соревнования внутри кернела."""
+    if not comp_slug or "/" in comp_slug:
+        raise ValueError(f"слаг соревнования '{comp_slug}' должен быть непустым, без '/'.")
     return f"{INPUT_ROOT}/competitions/{comp_slug}"
-
-
-def train_weights_mount(train_kernel_ref: str) -> str:
-    """Корень весов рана, видимый из infer-кернела: маунт output'а
-    train-кернела ('owner/train-<exp>-<run_id>') + подпапка weights.
-    utils.weights.weights_path(корень, run_id) дальше сам добавит <run_id>/."""
-    return f"{notebook_mount(train_kernel_ref)}/{WEIGHTS_SUBDIR}"

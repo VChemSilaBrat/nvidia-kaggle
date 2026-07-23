@@ -8,9 +8,10 @@
     ... --build-only                                  # собрать, не пушить
 
 Фазы (атомарно, 1 запуск = 1 id = 1 кернел):
-  0. pre-flight: git-корень, comp_config.json, KAGGLE_API_TOKEN, D2
-     (assert_committed), сверка _stamp.json sources-датасета с локальным
-     хешем (всегда, без обхода — ловит «забыл push_sources» ДО траты очереди)
+  0. pre-flight: git-корень, comp_config.json (персональный, в .gitignore),
+     kaggle_username == юзер токена, D2 (assert_committed), сверка _stamp.json
+     sources-датасета с локальным хешем — всегда, без обхода: ловит «забыл
+     push_sources» ДО траты очереди
   1. mint id (train → run_id, infer → infer_id) + git_sha + EXPECTED_SRC_HASH
   2. build: exps/<exp>/.build/<id>/ = инжектированный <stage>.py
      + kernel-metadata.json (слаг/маунты — из naming.py, единственный источник)
@@ -20,6 +21,11 @@
 
 Утилиты инстанса (utils/stamp.py, utils/run.py) импортируются ИЗ РЕПЫ —
 хеш считает тот же код, что проверяет его в кернеле. Дублей логики нет.
+
+Веса: train получает WEIGHTS_REL ("weights/<run_id>/") и пишет его в манифест
+как weights.path — путь ОТНОСИТЕЛЬНО КОРНЯ ИСТОЧНИКА. infer получает
+WEIGHTS_PATHS = {run_id: <корень-маунта-по-ref> + "/" + path} — полные пути,
+собранные из манифестов; никакого знания о под-папках в резолвере нет.
 """
 
 from __future__ import annotations
@@ -27,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,7 +40,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # соседний naming.py
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # соседние rogii-модули
+import common  # noqa: E402
 import naming  # noqa: E402
 
 MARKER_PREFIX = "# === injected by"
@@ -47,84 +53,43 @@ KAGGLE_WORKING = "/kaggle/working"
 GPU_SHAPES = {"t4": "NvidiaTeslaT4", "p100": "NvidiaTeslaP100"}
 
 
-def die(msg: str) -> None:
-    raise SystemExit(f"[kaggle_run] ОШИБКА: {msg}")
-
-
-def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    """Запуск команды; упавшая команда → громкая ошибка с полным выводом."""
-    res = subprocess.run(cmd, capture_output=True, text=True, **kw)
-    if res.returncode != 0:
-        die(
-            f"команда упала: {' '.join(cmd)}\n"
-            f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
-        )
-    return res
-
-
-def repo_root_from_cwd() -> Path:
-    res = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
-    )
-    if res.returncode != 0:
-        die("запускай из репы инстанса (cwd не в git-репозитории).")
-    return Path(res.stdout.strip())
-
-
-def load_comp_config(root: Path) -> dict:
-    path = root / "comp_config.json"
-    if not path.exists():
-        die("нет comp_config.json — скопируй comp_config.example.json и заполни.")
-    cfg = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("competition", "kaggle_username", "sources_dataset"):
-        value = cfg.get(key, "")
-        # кириллица/пробелы = незаполненный плейсхолдер из example
-        if not value or any(ord(ch) > 127 or ch.isspace() for ch in value):
-            die(f"поле '{key}' в comp_config.json не заполнено (сейчас: '{value}').")
-    if "/" not in cfg["sources_dataset"]:
-        die("sources_dataset должен быть 'owner/slug'.")
-    return cfg
-
-
-def kaggle_cli() -> str:
-    path = shutil.which("kaggle")
-    if not path:
-        die(
-            "kaggle CLI не найден в PATH. Запускай через uv:\n"
-            "  uv run --project <путь-к-форку-nvidia-kaggle> python ... kaggle_run.py ..."
-        )
-    return path
-
-
 def preflight_sources_fresh(cfg: dict, expected_hash: str) -> None:
     """Сверить _stamp.json ПОСЛЕДНЕЙ версии sources-датасета с локальным хешем.
 
     Ловит «правил src, забыл push_sources» до пуша кернела. Вторая линия —
-    stamp.verify внутри кернела (пиннинга версий у кагла нет, см. kaggle_facts).
+    stamp.verify внутри кернела (пиннинга версий у кагла нет, см. kaggle_facts):
+    она ловит stale-attach между пушем и стартом, эта — экономит очередь.
     """
     with tempfile.TemporaryDirectory() as td:
         res = subprocess.run(
-            [kaggle_cli(), "datasets", "download", cfg["sources_dataset"],
+            [common.kaggle_cli(), "datasets", "download", cfg["sources_dataset"],
              "-f", "_stamp.json", "-p", td, "--force"],
             capture_output=True, text=True,
         )
         if res.returncode != 0:
-            die(
-                f"не удалось скачать _stamp.json из {cfg['sources_dataset']}.\n"
+            raise SystemExit(
+                f"[kaggle_run] не удалось скачать _stamp.json из {cfg['sources_dataset']}.\n"
                 "Датасет ещё не создан или недоступен → запусти push_sources.py.\n"
                 f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
             )
         stamp_file = Path(td) / "_stamp.json"
         zipped = Path(td) / "_stamp.json.zip"
+        # Текущий CLI отдаёт мелкие файлы как есть (проверено эмпирически);
+        # zip-вариант задокументирован для CLI — ветка оставлена, чтобы при
+        # его срабатывании диагноз не врал.
         if not stamp_file.exists() and zipped.exists():
+            print("[kaggle_run] _stamp.json пришёл zip'ом — распаковываю")
             with zipfile.ZipFile(zipped) as zf:
                 zf.extract("_stamp.json", td)
         if not stamp_file.exists():
-            die("в sources-датасете нет _stamp.json — он запушен не push_sources'ом.")
+            raise SystemExit(
+                "[kaggle_run] в sources-датасете нет _stamp.json — "
+                "он запушен не push_sources'ом."
+            )
         attached = json.loads(stamp_file.read_text(encoding="utf-8"))["src_hash"]
     if attached != expected_hash:
-        die(
-            "sources-датасет отстал от локального src:\n"
+        raise SystemExit(
+            "[kaggle_run] sources-датасет отстал от локального src:\n"
             f"  локальный payload: {expected_hash}\n"
             f"  в датасете:        {attached}\n"
             "Запусти push_sources.py и повтори."
@@ -139,8 +104,29 @@ def find_run_dir(root: Path, run_id: str) -> Path:
     """
     matches = list(root.glob(f"exps/*/runs/{run_id}"))
     if not matches:
-        die(f"ран {run_id} не найден в exps/*/runs/ — опечатка в id?")
+        raise SystemExit(f"[kaggle_run] ран {run_id} не найден в exps/*/runs/ — опечатка в id?")
     return matches[0]
+
+
+def weights_source(ref: str, path: str, rid: str) -> tuple[str, str | None, str | None]:
+    """По weights.ref и weights.path манифеста → (полный путь весов в кернеле,
+    kernel_source для аттача, dataset_source для аттача).
+
+    Корень источника выбирается по типу ref, полный путь = корень + path
+    (path записан продюсером рана — резолвер не знает про под-папки).
+    """
+    if ref.startswith("kernel:"):
+        kref = ref.removeprefix("kernel:")  # 'owner/slug' — владелец из манифеста!
+        return f"{naming.notebook_mount(kref)}/{path}", kref, None
+    if ref.startswith("dataset:"):
+        dref = ref.removeprefix("dataset:")
+        return f"{naming.dataset_mount(dref)}/{path}", None, dref
+    if ref == "local":
+        raise SystemExit(
+            f"[kaggle_run] веса рана {rid} локальные — на кагл они не заливались. "
+            "Сначала push_weights (мост local→kaggle), потом infer."
+        )
+    raise SystemExit(f"[kaggle_run] неизвестный weights.ref '{ref}' у рана {rid}.")
 
 
 def build_header(script: str, exp: str, stage: str, values: dict) -> str:
@@ -169,21 +155,30 @@ def main() -> None:
     args = parser.parse_args()
 
     # ---- фаза 0: pre-flight ----
-    root = repo_root_from_cwd()
+    root = common.repo_root_from_cwd()
     sys.path.insert(0, str(root))
     from utils import run as runlib  # noqa: E402 — utils ИНСТАНСА
     from utils import stamp  # noqa: E402
 
-    cfg = load_comp_config(root)
-    if not os.environ.get("KAGGLE_API_TOKEN"):
-        die("KAGGLE_API_TOKEN не выставлен в окружении.")
+    cfg = common.load_comp_config(root)
+    user = cfg["kaggle_username"]
+    actual_user = common.token_username()
+    if user != actual_user:
+        raise SystemExit(
+            f"[kaggle_run] kaggle_username в comp_config.json ('{user}') != "
+            f"юзер токена ('{actual_user}'). Кернел пушится от юзера токена — "
+            "исправь свой персональный конфиг."
+        )
 
     stage_file = root / "exps" / args.exp / f"{args.stage}.py"
     if not stage_file.exists():
-        die(f"нет файла стадии: {stage_file}")
+        raise SystemExit(f"[kaggle_run] нет файла стадии: {stage_file}")
     body = stage_file.read_text(encoding="utf-8")
     if MARKER_PREFIX in body:
-        die(f"{stage_file} уже содержит инжектированную шапку — инжектить дважды нельзя.")
+        raise SystemExit(
+            f"[kaggle_run] {stage_file} уже содержит инжектированную шапку — "
+            "инжектить дважды нельзя."
+        )
 
     rel_stage = str(stage_file.relative_to(root))
     stamp.assert_committed(["src", "utils", rel_stage], root)
@@ -191,8 +186,6 @@ def main() -> None:
     git_sha = stamp.current_git_sha(root)
     expected = stamp.compute_src_hash(root)
     preflight_sources_fresh(cfg, expected)
-
-    user = cfg["kaggle_username"]
 
     # ---- фаза 1: mint + шапка ----
     values = {
@@ -212,36 +205,29 @@ def main() -> None:
         runlib.run_dir(args.exp, the_id, root)  # место для будущего фетча
         values["RUN_ID"] = the_id
         values["WEIGHTS_DIR"] = f"{KAGGLE_WORKING}/{naming.WEIGHTS_SUBDIR}"
+        values["WEIGHTS_REL"] = f"{naming.WEIGHTS_SUBDIR}/{the_id}/"
         values["WEIGHTS_REF"] = "kernel:" + naming.kernel_ref(user, "train", args.exp, the_id)
     elif args.stage == "infer":
         the_id = runlib.new_infer_id()
         runlib.infer_dir(args.exp, the_id, root)
         run_ids = [rid for rid in args.run_ids.split(",") if rid]
-        weights_dirs, weights_hashes = {}, {}
+        weights_paths, weights_hashes = {}, {}
         for rid in run_ids:
             manifest = runlib.read_manifest(find_run_dir(root, rid))
             if manifest.weights is None:
-                die(f"у рана {rid} в манифесте нет весов.")
-            ref = manifest.weights.ref
-            if ref.startswith("kernel:"):
-                kref = ref.removeprefix("kernel:")  # 'owner/slug' — владелец из манифеста!
-                kernel_sources.append(kref)
-                weights_dirs[rid] = naming.train_weights_mount(kref)
-            elif ref.startswith("dataset:"):
-                dref = ref.removeprefix("dataset:")
-                dataset_sources.append(dref)
-                weights_dirs[rid] = naming.dataset_mount(dref)
-            elif ref == "local":
-                die(
-                    f"веса рана {rid} локальные — на кагл они не заливались. "
-                    "Сначала push_weights (мост local→kaggle), потом infer."
-                )
-            else:
-                die(f"неизвестный weights.ref '{ref}' у рана {rid}.")
+                raise SystemExit(f"[kaggle_run] у рана {rid} в манифесте нет весов.")
+            full_path, ksrc, dsrc = weights_source(
+                manifest.weights.ref, manifest.weights.path, rid
+            )
+            weights_paths[rid] = full_path
             weights_hashes[rid] = manifest.weights.hash
+            if ksrc:
+                kernel_sources.append(ksrc)
+            if dsrc:
+                dataset_sources.append(dsrc)
         values["INFER_ID"] = the_id
         values["RUN_IDS"] = run_ids
-        values["WEIGHTS_DIRS"] = weights_dirs
+        values["WEIGHTS_PATHS"] = weights_paths
         values["WEIGHTS_HASHES"] = weights_hashes
     else:  # debug: id только для уникальности слага, реестр не трогаем
         the_id = runlib.new_run_id()
@@ -262,9 +248,9 @@ def main() -> None:
         "code_file": code_file,
         "language": "python",
         "kernel_type": "script",
-        "is_private": "true",
-        "enable_gpu": "true" if args.accelerator != "none" else "false",
-        "enable_internet": "false",
+        "is_private": True,
+        "enable_gpu": args.accelerator != "none",
+        "enable_internet": False,
         "dataset_sources": dataset_sources,
         "competition_sources": [cfg["competition"]],
         "kernel_sources": kernel_sources,
@@ -290,7 +276,7 @@ def main() -> None:
         return
 
     # ---- фаза 3: push (их скрипт; поллит статус до терминального) ----
-    print(f"[kaggle_run] пуш через submit_kernel.py ...")
+    print("[kaggle_run] пуш через submit_kernel.py ...")
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     proc = subprocess.Popen(
         submit_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -307,7 +293,8 @@ def main() -> None:
         print(f"[kaggle_run] дальше: fetch_run_outputs.py --kernel {user}/{slug}")
     else:
         print(f"[kaggle_run] FAILED (exit {proc.returncode}) | {where}")
-        print("[kaggle_run] лог причины: fetch_run_outputs.py тем же вызовом (тянет .log).")
+        print("[kaggle_run] причина — в логе кернела: fetch_run_outputs.py --kernel "
+              f"{user}/{slug} (тянет .log даже при ERROR).")
     sys.exit(proc.returncode)
 
 
