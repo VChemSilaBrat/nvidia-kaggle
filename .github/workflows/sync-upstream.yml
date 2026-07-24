@@ -1,0 +1,65 @@
+# Еженедельный синк с upstream NVIDIA/nvidia-kaggle.
+# Только ГОТОВИТ PR (чистый мердж или ветка с конфликтами) — в main сам
+# ничего не льёт: от форка зависят все инстансы, merge — только через
+# ревью (резолв — run_maintainer.sh).
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # понедельник 06:00 UTC
+  workflow_dispatch: {} # ручной запуск кнопкой Run workflow
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: merge upstream into sync branch
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "sync-upstream[bot]"
+          git config user.email "actions@github.com"
+          git remote add upstream https://github.com/NVIDIA/nvidia-kaggle.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "уже содержит upstream/main — делать нечего"
+            echo "status=uptodate" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BRANCH="sync/upstream-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+          if git merge --no-edit upstream/main; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+          else
+            # конфликт: коммитим КАК ЕСТЬ (с маркерами) — резолвит
+            # maintainer-агент локально на этой ветке
+            git add -A
+            git commit -m "WIP: merge upstream/main — есть конфликты, резолв maintainer-агентом"
+            echo "status=conflicts" >> "$GITHUB_OUTPUT"
+          fi
+          git push -u origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: open PR
+        if: steps.merge.outputs.status != 'uptodate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.merge.outputs.status }}" = "conflicts" ]; then
+            TITLE="[CONFLICTS] sync upstream $(date +%Y-%m-%d)"
+            BODY="Мердж upstream/main с конфликтами (маркеры закоммичены). Резолв: checkout ветки + ./run_maintainer.sh"
+          else
+            TITLE="sync upstream $(date +%Y-%m-%d)"
+            BODY="Чистый мердж upstream/main. Прогнать глазами/агентом и смержить."
+          fi
+          gh pr create --base main --head "${{ steps.merge.outputs.branch }}" \
+            --title "$TITLE" --body "$BODY"
